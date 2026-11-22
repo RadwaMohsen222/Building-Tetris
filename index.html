@@ -1,1 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Building Tetris Interactive</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      background-color: #add8e6; /* Solid light blue background */
+      overflow: hidden; /* Prevents scrollbars */
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      font-family: sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+    }
 
+    /* Vertical portrait canvas matching 2793x3724 ratio */
+    #container {
+      position: relative;
+      aspect-ratio: 2793 / 3724;
+      height: 100vh;
+      max-width: 100vw;
+      margin: 0 auto;
+    }
+
+    .layer {
+      position: absolute;
+      transition: transform 0.05s linear;
+      display: block;
+      pointer-events: none; /* Handled accurately via pixel alpha detection */
+      -webkit-user-drag: none;
+    }
+
+    #controls {
+      position: fixed;
+      top: 20px;
+      left: 20px;
+      z-index: 10000;
+      display: flex;
+      gap: 10px;
+    }
+
+    .ctrl-btn {
+      padding: 10px 16px;
+      font-size: 14px;
+      font-weight: bold;
+      background-color: #007bff;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+    }
+    .ctrl-btn:hover {
+      background-color: #0056b3;
+    }
+    .ctrl-btn.secondary {
+      background-color: #334155;
+    }
+    .ctrl-btn.secondary:hover {
+      background-color: #1e293b;
+    }
+
+    /* Absolute layer positions with locked z-index (1 on top, 12 at bottom) */
+    #layer-1  { top: 47.15%; left: -0.04%; width: 100.00%; z-index: 12; }
+    #layer-2  { top: 42.11%; left: 50.77%; width: 11.92%; z-index: 11; }
+    #layer-3  { top: 42.53%; left: 56.25%; width: 18.73%; z-index: 10; }
+    #layer-4  { top: 25.08%; left: 50.73%; width: 12.21%; z-index: 9;  }
+    #layer-5  { top: 37.59%; left: 42.03%; width: 20.69%; z-index: 8;  }
+    #layer-6  { top: 48.17%; left: 46.33%; width: 28.68%; z-index: 7;  }
+    #layer-7  { top: 26.21%; left: 41.96%; width: 20.84%; z-index: 6;  }
+    #layer-8  { top: 39.10%; left: 37.92%; width: 18.47%; z-index: 5;  }
+    #layer-9  { top: 27.12%; left: 37.88%; width: 18.51%; z-index: 4;  }
+    #layer-10 { top: 37.41%; left: 55.96%; width: 23.13%; z-index: 3;  }
+    #layer-11 { top: 32.47%; left: 56.10%; width: 23.38%; z-index: 2;  }
+    #layer-12 { top: 25.78%; left: 56.10%; width: 23.38%; z-index: 1;  }
+  </style>
+</head>
+<body>
+
+  <div id="controls">
+    <button id="mode-btn" class="ctrl-btn">Mode: Hold Click</button>
+    <button id="reset-btn" class="ctrl-btn secondary">Reset All</button>
+  </div>
+
+  <div id="container">
+    <img id="layer-12" class="layer" src="12.png" />
+    <img id="layer-11" class="layer" src="11.png" />
+    <img id="layer-10" class="layer" src="10.png" />
+    <img id="layer-9"  class="layer" src="9.png" />
+    <img id="layer-8"  class="layer" src="8.png" />
+    <img id="layer-7"  class="layer" src="7.png" />
+    <img id="layer-6"  class="layer" src="6.png" />
+    <img id="layer-5"  class="layer" src="5.png" />
+    <img id="layer-4"  class="layer" src="4.png" />
+    <img id="layer-3"  class="layer" src="3.png" />
+    <img id="layer-2"  class="layer" src="2.png" />
+    <img id="layer-1"  class="layer" src="1.png" />
+  </div>
+
+  <script>
+    const moveableIds = [2, 3, 4, 5, 7, 8, 9, 10, 11, 12];
+    const states = {};
+    const hitCanvases = {};
+
+    // Directional vectors (X, Y) and float thresholds
+    const layerConfigs = {
+      12: { dirX:  1.0, dirY: -0.8, maxOffset: 120, speed: 1.2 }, // Diagonally Right-Up
+      11: { dirX:  1.0, dirY: -0.8, maxOffset: 110, speed: 1.1 }, // Diagonally Right-Up
+      10: { dirX:  1.0, dirY: -0.8, maxOffset: 100, speed: 1.0 }, // Diagonally Right-Up
+       3: { dirX:  1.2, dirY:  0.6, maxOffset: 110, speed: 1.1 }, // Diagonally Right-Down
+       4: { dirX:  0.0, dirY: -1.0, maxOffset: 120, speed: 1.3 }, // Straight Up
+       2: { dirX:  0.0, dirY: -1.0, maxOffset: 100, speed: 1.0 }, // Straight Up
+       9: { dirX: -1.0, dirY: -0.7, maxOffset: 110, speed: 1.1 }, // Diagonally Left-Up
+       7: { dirX: -1.0, dirY: -0.7, maxOffset: 100, speed: 1.0 }, // Diagonally Left-Up
+       8: { dirX: -1.0, dirY: -0.7, maxOffset: 90,  speed: 0.9 }, // Diagonally Left-Up
+       5: { dirX: -1.1, dirY: -1.0, maxOffset: 110, speed: 1.1 }  // Diagonally Left-Up
+    };
+
+    // Build offscreen hit-test canvases so transparent PNG areas don't block clicks
+    function buildHitCanvas(id, img) {
+      if (!img.naturalWidth || !img.naturalHeight) return;
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      hitCanvases[id] = ctx;
+    }
+
+    // Initialize state and image hit-maps
+    moveableIds.forEach(id => {
+      states[id] = { pressed: false, currentOffset: 0 };
+      const img = document.getElementById(`layer-${id}`);
+      if (img.complete) {
+        buildHitCanvas(id, img);
+      } else {
+        img.addEventListener('load', () => buildHitCanvas(id, img));
+      }
+    });
+
+    // Find the topmost non-transparent moveable block under the mouse cursor
+    function getLayerAtPoint(clientX, clientY) {
+      // moveableIds is ordered [2..12], matching top-to-bottom z-index (11 down to 1)
+      for (const id of moveableIds) {
+        const el = document.getElementById(`layer-${id}`);
+        const rect = el.getBoundingClientRect();
+
+        if (
+          clientX >= rect.left &&
+          clientX <= rect.right &&
+          clientY >= rect.top &&
+          clientY <= rect.bottom
+        ) {
+          const ctx = hitCanvases[id];
+          if (!ctx) return id; // Fallback if opened via strict local security without canvas read
+
+          const relX = Math.floor(((clientX - rect.left) / rect.width) * ctx.canvas.width);
+          const relY = Math.floor(((clientY - rect.top) / rect.height) * ctx.canvas.height);
+
+          try {
+            const alpha = ctx.getImageData(relX, relY, 1, 1).data[3];
+            if (alpha > 20) return id; // Solid pixel hit
+          } catch (e) {
+            // Fallback for browsers blocking getImageData on file:// URLs
+            return id;
+          }
+        }
+      }
+      return null;
+    }
+
+    // Mouse / Touch Interaction
+    let toggleMode = false;
+    let activeHeldId = null;
+
+    const container = document.getElementById('container');
+
+    container.addEventListener('pointerdown', (e) => {
+      const hitId = getLayerAtPoint(e.clientX, e.clientY);
+      if (!hitId) return;
+
+      if (toggleMode) {
+        states[hitId].pressed = !states[hitId].pressed;
+      } else {
+        activeHeldId = hitId;
+        states[hitId].pressed = true;
+      }
+    });
+
+    window.addEventListener('pointerup', () => {
+      if (!toggleMode && activeHeldId !== null) {
+        states[activeHeldId].pressed = false;
+        activeHeldId = null;
+      }
+    });
+
+    // Show pointer cursor when hovering over a clickable block
+    container.addEventListener('pointermove', (e) => {
+      const hitId = getLayerAtPoint(e.clientX, e.clientY);
+      container.style.cursor = hitId ? 'pointer' : 'default';
+    });
+
+    // Mode & Reset buttons
+    const modeBtn = document.getElementById('mode-btn');
+    modeBtn.addEventListener('click', () => {
+      toggleMode = !toggleMode;
+      modeBtn.textContent = toggleMode ? 'Mode: Click to Toggle' : 'Mode: Hold Click';
+      moveableIds.forEach(id => states[id].pressed = false);
+      activeHeldId = null;
+    });
+
+    document.getElementById('reset-btn').addEventListener('click', () => {
+      moveableIds.forEach(id => states[id].pressed = false);
+      activeHeldId = null;
+    });
+
+    // Animation Loop
+    function animate() {
+      moveableIds.forEach(id => {
+        const item = states[id];
+        const config = layerConfigs[id];
+
+        if (item.pressed) {
+          if (item.currentOffset < config.maxOffset) {
+            item.currentOffset += config.speed;
+          }
+        } else {
+          if (item.currentOffset > 0) {
+            item.currentOffset -= config.speed * 0.8;
+            if (item.currentOffset < 0) item.currentOffset = 0;
+          }
+        }
+
+        const el = document.getElementById(`layer-${id}`);
+        if (el) {
+          const posX = item.currentOffset * config.dirX;
+          const posY = item.currentOffset * config.dirY;
+          el.style.transform = `translate(${posX}px, ${posY}px)`;
+        }
+      });
+      requestAnimationFrame(animate);
+    }
+    animate();
+  </script>
+</body>
+</html>
