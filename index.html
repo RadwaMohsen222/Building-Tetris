@@ -39,13 +39,19 @@
       -webkit-user-drag: none;
     }
 
+    .layer.dragging {
+      transition: none; /* Instant 1:1 mouse tracking while dragging */
+      filter: drop-shadow(0 10px 18px rgba(0, 0, 0, 0.28));
+    }
+
     #controls {
       position: fixed;
       top: 20px;
       left: 20px;
-      z-index: 10000;
+      z-index: 100000;
       display: flex;
       gap: 10px;
+      flex-wrap: wrap;
     }
 
     .ctrl-btn {
@@ -58,9 +64,16 @@
       border-radius: 5px;
       cursor: pointer;
       box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+      transition: background-color 0.15s ease;
     }
     .ctrl-btn:hover {
       background-color: #0056b3;
+    }
+    .ctrl-btn.drag-active {
+      background-color: #059669;
+    }
+    .ctrl-btn.drag-active:hover {
+      background-color: #047857;
     }
     .ctrl-btn.secondary {
       background-color: #334155;
@@ -69,7 +82,7 @@
       background-color: #1e293b;
     }
 
-    /* Absolute layer positions with locked z-index (1 on top, 12 at bottom) */
+    /* Absolute layer positions with initial locked z-index (1 on top, 12 at bottom) */
     #layer-1  { top: 47.15%; left: -0.04%; width: 100.00%; z-index: 12; }
     #layer-2  { top: 42.11%; left: 50.77%; width: 11.92%; z-index: 11; }
     #layer-3  { top: 42.53%; left: 56.25%; width: 18.73%; z-index: 10; }
@@ -88,6 +101,7 @@
 
   <div id="controls">
     <button id="mode-btn" class="ctrl-btn">Mode: Hold Click</button>
+    <button id="drag-mode-btn" class="ctrl-btn secondary">Free Drag &amp; Reorder: OFF</button>
     <button id="reset-btn" class="ctrl-btn secondary">Reset All</button>
   </div>
 
@@ -111,18 +125,24 @@
     const states = {};
     const hitCanvases = {};
 
+    const initialZIndex = {
+      1: 12, 2: 11, 3: 10, 4: 9, 5: 8, 6: 7,
+      7: 6, 8: 5, 9: 4, 10: 3, 11: 2, 12: 1
+    };
+    let topZIndex = 20;
+
     // Directional vectors (X, Y) and float thresholds
     const layerConfigs = {
-      12: { dirX:  1.0, dirY: -0.8, maxOffset: 120, speed: 1.2 }, // Diagonally Right-Up
-      11: { dirX:  1.0, dirY: -0.8, maxOffset: 110, speed: 1.1 }, // Diagonally Right-Up
-      10: { dirX:  1.0, dirY: -0.8, maxOffset: 100, speed: 1.0 }, // Diagonally Right-Up
-       3: { dirX:  1.2, dirY:  0.6, maxOffset: 110, speed: 1.1 }, // Diagonally Right-Down
-       4: { dirX:  0.0, dirY: -1.0, maxOffset: 120, speed: 1.3 }, // Straight Up
-       2: { dirX:  0.0, dirY: -1.0, maxOffset: 100, speed: 1.0 }, // Straight Up
-       9: { dirX: -1.0, dirY: -0.7, maxOffset: 110, speed: 1.1 }, // Diagonally Left-Up
-       7: { dirX: -1.0, dirY: -0.7, maxOffset: 100, speed: 1.0 }, // Diagonally Left-Up
-       8: { dirX: -1.0, dirY: -0.7, maxOffset: 90,  speed: 0.9 }, // Diagonally Left-Up
-       5: { dirX: -1.1, dirY: -1.0, maxOffset: 110, speed: 1.1 }  // Diagonally Left-Up
+      12: { dirX:  1.0, dirY: -0.8, maxOffset: 120, speed: 1.2 },
+      11: { dirX:  1.0, dirY: -0.8, maxOffset: 110, speed: 1.1 },
+      10: { dirX:  1.0, dirY: -0.8, maxOffset: 100, speed: 1.0 },
+       3: { dirX:  1.2, dirY:  0.6, maxOffset: 110, speed: 1.1 },
+       4: { dirX:  0.0, dirY: -1.0, maxOffset: 120, speed: 1.3 },
+       2: { dirX:  0.0, dirY: -1.0, maxOffset: 100, speed: 1.0 },
+       9: { dirX: -1.0, dirY: -0.7, maxOffset: 110, speed: 1.1 },
+       7: { dirX: -1.0, dirY: -0.7, maxOffset: 100, speed: 1.0 },
+       8: { dirX: -1.0, dirY: -0.7, maxOffset: 90,  speed: 0.9 },
+       5: { dirX: -1.1, dirY: -1.0, maxOffset: 110, speed: 1.1 }
     };
 
     // Build offscreen hit-test canvases so transparent PNG areas don't block clicks
@@ -138,7 +158,13 @@
 
     // Initialize state and image hit-maps
     moveableIds.forEach(id => {
-      states[id] = { pressed: false, currentOffset: 0 };
+      states[id] = {
+        pressed: false,
+        currentOffset: 0,
+        freeX: 0,
+        freeY: 0,
+        zIndex: initialZIndex[id]
+      };
       const img = document.getElementById(`layer-${id}`);
       if (img.complete) {
         buildHitCanvas(id, img);
@@ -148,9 +174,11 @@
     });
 
     // Find the topmost non-transparent moveable block under the mouse cursor
+    // Sorted by current zIndex descending so reordered top pieces get clicked first
     function getLayerAtPoint(clientX, clientY) {
-      // moveableIds is ordered [2..12], matching top-to-bottom z-index (11 down to 1)
-      for (const id of moveableIds) {
+      const sortedIds = [...moveableIds].sort((a, b) => states[b].zIndex - states[a].zIndex);
+
+      for (const id of sortedIds) {
         const el = document.getElementById(`layer-${id}`);
         const rect = el.getBoundingClientRect();
 
@@ -161,16 +189,15 @@
           clientY <= rect.bottom
         ) {
           const ctx = hitCanvases[id];
-          if (!ctx) return id; // Fallback if opened via strict local security without canvas read
+          if (!ctx) return id;
 
           const relX = Math.floor(((clientX - rect.left) / rect.width) * ctx.canvas.width);
           const relY = Math.floor(((clientY - rect.top) / rect.height) * ctx.canvas.height);
 
           try {
             const alpha = ctx.getImageData(relX, relY, 1, 1).data[3];
-            if (alpha > 20) return id; // Solid pixel hit
+            if (alpha > 20) return id;
           } catch (e) {
-            // Fallback for browsers blocking getImageData on file:// URLs
             return id;
           }
         }
@@ -178,15 +205,46 @@
       return null;
     }
 
-    // Mouse / Touch Interaction
+    // Interaction State
     let toggleMode = false;
+    let freeDragMode = false;
     let activeHeldId = null;
 
+    let draggingId = null;
+    let dragStartMouseX = 0;
+    let dragStartMouseY = 0;
+    let dragStartBlockX = 0;
+    let dragStartBlockY = 0;
+
     const container = document.getElementById('container');
+    const modeBtn = document.getElementById('mode-btn');
+    const dragModeBtn = document.getElementById('drag-mode-btn');
+
+    function bringToFront(id) {
+      topZIndex += 1;
+      states[id].zIndex = topZIndex;
+      const el = document.getElementById(`layer-${id}`);
+      if (el) el.style.zIndex = topZIndex;
+    }
 
     container.addEventListener('pointerdown', (e) => {
       const hitId = getLayerAtPoint(e.clientX, e.clientY);
       if (!hitId) return;
+
+      if (freeDragMode) {
+        // Bring held piece to the very top and start free dragging
+        bringToFront(hitId);
+        draggingId = hitId;
+        dragStartMouseX = e.clientX;
+        dragStartMouseY = e.clientY;
+        dragStartBlockX = states[hitId].freeX;
+        dragStartBlockY = states[hitId].freeY;
+
+        const el = document.getElementById(`layer-${hitId}`);
+        if (el) el.classList.add('dragging');
+        container.style.cursor = 'grabbing';
+        return;
+      }
 
       if (toggleMode) {
         states[hitId].pressed = !states[hitId].pressed;
@@ -196,31 +254,88 @@
       }
     });
 
+    window.addEventListener('pointermove', (e) => {
+      if (freeDragMode && draggingId !== null) {
+        const dx = e.clientX - dragStartMouseX;
+        const dy = e.clientY - dragStartMouseY;
+        states[draggingId].freeX = dragStartBlockX + dx;
+        states[draggingId].freeY = dragStartBlockY + dy;
+        return;
+      }
+
+      const hitId = getLayerAtPoint(e.clientX, e.clientY);
+      if (!hitId) {
+        container.style.cursor = 'default';
+      } else {
+        container.style.cursor = freeDragMode ? 'grab' : 'pointer';
+      }
+    });
+
     window.addEventListener('pointerup', () => {
+      if (draggingId !== null) {
+        const el = document.getElementById(`layer-${draggingId}`);
+        if (el) el.classList.remove('dragging');
+        draggingId = null;
+        container.style.cursor = freeDragMode ? 'grab' : 'default';
+      }
+
       if (!toggleMode && activeHeldId !== null) {
         states[activeHeldId].pressed = false;
         activeHeldId = null;
       }
     });
 
-    // Show pointer cursor when hovering over a clickable block
-    container.addEventListener('pointermove', (e) => {
-      const hitId = getLayerAtPoint(e.clientX, e.clientY);
-      container.style.cursor = hitId ? 'pointer' : 'default';
-    });
-
-    // Mode & Reset buttons
-    const modeBtn = document.getElementById('mode-btn');
+    // Toggle Hold vs Click-Toggle mode
     modeBtn.addEventListener('click', () => {
+      if (freeDragMode) {
+        freeDragMode = false;
+        dragModeBtn.textContent = 'Free Drag & Reorder: OFF';
+        dragModeBtn.classList.remove('drag-active');
+        dragModeBtn.classList.add('secondary');
+      }
       toggleMode = !toggleMode;
       modeBtn.textContent = toggleMode ? 'Mode: Click to Toggle' : 'Mode: Hold Click';
       moveableIds.forEach(id => states[id].pressed = false);
       activeHeldId = null;
     });
 
+    // Toggle Free Drag & Reorder mode
+    dragModeBtn.addEventListener('click', () => {
+      freeDragMode = !freeDragMode;
+      if (freeDragMode) {
+        dragModeBtn.textContent = 'Free Drag & Reorder: ON';
+        dragModeBtn.classList.remove('secondary');
+        dragModeBtn.classList.add('drag-active');
+        moveableIds.forEach(id => states[id].pressed = false);
+        activeHeldId = null;
+      } else {
+        dragModeBtn.textContent = 'Free Drag & Reorder: OFF';
+        dragModeBtn.classList.remove('drag-active');
+        dragModeBtn.classList.add('secondary');
+        draggingId = null;
+      }
+    });
+
+    // Reset positions, float offsets, and z-index stacking order
     document.getElementById('reset-btn').addEventListener('click', () => {
-      moveableIds.forEach(id => states[id].pressed = false);
+      topZIndex = 20;
+      draggingId = null;
       activeHeldId = null;
+
+      moveableIds.forEach(id => {
+        states[id].pressed = false;
+        states[id].currentOffset = 0;
+        states[id].freeX = 0;
+        states[id].freeY = 0;
+        states[id].zIndex = initialZIndex[id];
+
+        const el = document.getElementById(`layer-${id}`);
+        if (el) {
+          el.classList.remove('dragging');
+          el.style.zIndex = initialZIndex[id];
+          el.style.transform = 'translate(0px, 0px)';
+        }
+      });
     });
 
     // Animation Loop
@@ -229,21 +344,23 @@
         const item = states[id];
         const config = layerConfigs[id];
 
-        if (item.pressed) {
-          if (item.currentOffset < config.maxOffset) {
-            item.currentOffset += config.speed;
-          }
-        } else {
-          if (item.currentOffset > 0) {
-            item.currentOffset -= config.speed * 0.8;
-            if (item.currentOffset < 0) item.currentOffset = 0;
+        if (!freeDragMode) {
+          if (item.pressed) {
+            if (item.currentOffset < config.maxOffset) {
+              item.currentOffset += config.speed;
+            }
+          } else {
+            if (item.currentOffset > 0) {
+              item.currentOffset -= config.speed * 0.8;
+              if (item.currentOffset < 0) item.currentOffset = 0;
+            }
           }
         }
 
         const el = document.getElementById(`layer-${id}`);
         if (el) {
-          const posX = item.currentOffset * config.dirX;
-          const posY = item.currentOffset * config.dirY;
+          const posX = item.freeX + (item.currentOffset * config.dirX);
+          const posY = item.freeY + (item.currentOffset * config.dirY);
           el.style.transform = `translate(${posX}px, ${posY}px)`;
         }
       });
